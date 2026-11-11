@@ -1,8 +1,18 @@
 # Board
 
+> # This project is 4-shots using GPT, I just find it useful
+
 ask your AI agent to compile it for you, I havent checked a single line of code.
 
-Native macOS camera notebook, with Desk’s palette and controls. The board fills the window.
+Native macOS camera notebook. The board fills the window.
+
+## Collaborate with Claude or GPT
+
+Board includes a local MCP server for **Claude (Desktop and Code)** and **GPT agents via Codex**. Your agent can also set it up for you. In Live view, turn on the camera, track the fully visible board and mark your sketch with a rectangle. Then ask:
+
+> I have drawn a schema in top-left, put a better quality image upon it.
+
+The agent can read that region and render a cleaner diagram over your sketch in the camera view, or add text, answers and questions. Images are sent only on demand, one requested crop at a time, keeping image context small without a continuous video feed. Diagram overlays use editable shapes and text.
 
 ## Use
 
@@ -80,7 +90,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 
 `scripts/test-tracking` handles the native module and runtime linkage. Pass `reference.png older.png latest.png [rawA.png rawB.png]` to include real-photo and Vision person-mask checks. `tests/NativeTrackerChecks.mm` covers real image pairs, geometry, excluded people, immutable-reference recovery and rejection of unrelated content. Swift checks cover tracking rates and recovery gates, image persistence, clipboard PNG/TIFF data, projective live markings and annotation persistence. Native tracking checks require the staged headers/libraries and their runtime search path. UI tests use isolated fixtures. Synthetic and saved-image tests do not establish robustness for every physical board or lighting condition.
 
-The build includes Desk’s local workaround for mixed-version Command Line Tools without changing the installed toolchain. The app is ad-hoc signed, not notarized. Desk’s MIT license remains in LICENSE.
+The build handles mixed-version Command Line Tools without changing the installed toolchain. The app is ad-hoc signed, not notarized. The MIT license is in LICENSE.
 
 To share source, run `python3 scripts/export-source.py`. It produces `dist/Board-source.zip` containing the source, tests, build scripts, license and a checksum manifest. It excludes build caches, compiled apps, logs, photographs, Board data and local client settings. The exporter rejects recognizable credential literals and personal home paths instead of silently packaging them. Keep `.build/` and `dist/` out of Git.
 
