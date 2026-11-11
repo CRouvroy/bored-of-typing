@@ -1,0 +1,33 @@
+.build/
+dist/
+.DS_Store
+.swiftpm/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+*.zip
+
+# Local credentials/configuration are never source inputs.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+auth.json
+
+# Guard against accidentally choosing the project as BOARD_DATA_DIR.
+/library.json
+/live-annotations.json
+/overlays.json
+/current.json
+/current.png
+/.library.lock
+/.live-annotations.lock
+/.overlays.lock
+/collaboration/
+/originals/
+/revisions/
+/exports/

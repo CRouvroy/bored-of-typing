@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Select a compatible installed SDK without modifying the developer tools."""
+import os
+from pathlib import Path
+import plistlib
+import subprocess
+import sys
+
+
+class SDKError(Exception):
+    pass
+
+
+def command(*arguments):
+    try:
+        return subprocess.check_output(arguments, text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        raise SDKError('Install Xcode or Command Line Tools with Swift 6 and a macOS 26+ SDK, then select it with xcode-select.') from None
+
+
+def sdk_version(path):
+    try:
+        settings = plistlib.loads((Path(path) / 'SDKSettings.plist').read_bytes())
+        if not settings.get('CanonicalName', '').startswith('macosx'):
+            return ()
+        return tuple(int(part) for part in settings['Version'].split('.'))
+    except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
+        return ()
+
+
+def choose_sdk(default, candidates, macros_available, explicit=None):
+    if explicit:
+        path = Path(explicit)
+        if sdk_version(path) < (26,):
+            raise SDKError('The requested SDK must be an installed macOS 26+ SDK.')
+        if sdk_version(path) >= (27,) and not macros_available:
+            raise SDKError('The selected beta SDK requires SwiftUI compiler plugins missing from this toolchain. Select a matching Xcode, or a macOS 26 SDK with BOARD_SDK_PATH.')
+        return path.resolve()
+    default = Path(default)
+    version = sdk_version(default)
+    if version >= (26,) and (version < (27,) or macros_available):
+        return default.resolve()
+    compatible = [Path(path) for path in candidates
+                  if sdk_version(path) >= (26,) and (sdk_version(path) < (27,) or macros_available)]
+    if compatible:
+        return max(compatible, key=sdk_version).resolve()
+    raise SDKError('No compatible macOS 26+ SDK found. Install matching Xcode/Command Line Tools, or set BOARD_SDK_PATH to an installed macOS 26 SDK.')
+
+
+def main():
+    default = Path(command('xcrun', '--sdk', 'macosx', '--show-sdk-path'))
+    swift = Path(command('xcrun', '--find', 'swift'))
+    macros = (swift.parent / '../lib/swift/host/plugins/libSwiftUIMacros.dylib').is_file()
+    # Apple's /usr/bin/python3 launcher inserts SDKROOT even when the caller
+    # did not set it. Treat that as a preference, not an explicit override.
+    requested = os.environ.get('BOARD_SDK_PATH')
+    preferred = os.environ.get('SDKROOT')
+    if preferred and not requested:
+        default = Path(preferred) if Path(preferred).is_absolute() else Path(command('xcrun', '--sdk', preferred, '--show-sdk-path'))
+    if requested and not Path(requested).is_absolute():
+        requested = command('xcrun', '--sdk', requested, '--show-sdk-path')
+    roots = {default.parent, default.resolve().parent,
+             Path('/Library/Developer/CommandLineTools/SDKs'),
+             Path('/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs')}
+    candidates = [path for root in roots for path in root.glob('MacOSX*.sdk')]
+    print(choose_sdk(default, candidates, macros, requested))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except SDKError as error:
+        sys.exit('Board: ' + str(error))

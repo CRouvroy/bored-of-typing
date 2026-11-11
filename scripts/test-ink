@@ -1,0 +1,11 @@
+#!/bin/bash
+# In-memory synthetic images only: no camera, model, UI or saved board data.
+set -euo pipefail
+BOARD_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BOARD_TEST_SDK="$("$BOARD_ROOT/scripts/macos-sdk")"
+BOARD_TEST_DIR="$(mktemp -d -t BoardInkChecks)"
+trap 'rm -rf "$BOARD_TEST_DIR"' EXIT
+xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx26.0" -sdk "$BOARD_TEST_SDK" \
+    "$BOARD_ROOT/Sources/BoardApp/BoardInkChange.swift" "$BOARD_ROOT/tests/InkChangeChecks.swift" \
+    -o "$BOARD_TEST_DIR/InkChangeChecks"
+"$BOARD_TEST_DIR/InkChangeChecks"

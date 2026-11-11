@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Stage the pinned arm64 OpenCV runtime locally; never install or update Homebrew."""
+import argparse
+import hashlib
+import json
+import os
+import platform
+import shutil
+import ssl
+import subprocess
+import tarfile
+import tempfile
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+CACHE = ROOT / '.build/opencv-probe'
+RUNTIME = ROOT / '.build/OpenCVRuntime'
+RECIPE = 'opencv-4.14.0_11-arm64-macos26-v2-public-bottles'
+# Immutable public Homebrew bottle digests, arm64_sequoia. GCC/libomp metadata:
+# https://ghcr.io/v2/homebrew/core/gcc/manifests/15.2.0
+# https://ghcr.io/v2/homebrew/core/libomp/manifests/21.1.5
+# Read the arm64_sequoia entry's sh.brew.bottle.digest / sh.brew.bottle.size
+# using an anonymous pull token from the public registry's token endpoint.
+BOTTLES = [
+    ('opencv4', 'opencv/4', 'opencv@4/4.14.0_11', '3cc94997de5d22dbaf7fc185658131e9a92180c5f8baca9c22be7525558d2cbb', 43416359),
+    ('tbb', 'tbb', 'tbb/2023.2.0', 'b42c154310ff3819dd5efcef8a52e6f12547bf52d2299c9e60bf88e4c22b46bd', 597294),
+    ('openblas', 'openblas', 'openblas/0.3.34', '779aa71127f0c6ce10db5f68a0a00fbeccb9146c4a2889d0f423d538fb9d4f60', 14102147),
+    ('gcc', 'gcc', 'gcc/15.2.0', 'aef7b1f77984d6a599b4d5a4002d91b777debea49bdc429be9a0fc13cfd82974', 154125656),
+    ('libomp', 'libomp', 'libomp/21.1.5', '58b99f5cf315417edfb10cac00e49bcc6881ae56af2d239ea6e6d7f7386bf549', 586515),
+]
+MODULES = ('core', 'imgproc', 'features2d', 'flann', 'calib3d')
+SOURCES = {'libopencv_' + name + '.414.dylib': 'opencv@4/4.14.0_11/lib/libopencv_' + name + '.4.14.0.dylib' for name in MODULES}
+SOURCES.update({
+    'libtbb.12.dylib': 'tbb/2023.2.0/lib/libtbb.12.20.dylib',
+    'libopenblas.0.dylib': 'openblas/0.3.34/lib/libopenblasp-r0.3.34.dylib',
+    'libgfortran.5.dylib': 'gcc/15.2.0/lib/gcc/current/libgfortran.5.dylib',
+    'libgcc_s.1.1.dylib': 'gcc/15.2.0/lib/gcc/current/libgcc_s.1.1.dylib',
+    'libquadmath.0.dylib': 'gcc/15.2.0/lib/gcc/current/libquadmath.0.dylib',
+    'libomp.dylib': 'libomp/21.1.5/lib/libomp.dylib',
+})
+LICENSES = {
+    'OpenCV-4.14.0-LICENSE': 'opencv@4/4.14.0_11/LICENSE',
+    'OpenCV-4.14.0-COPYRIGHT': 'opencv@4/4.14.0_11/COPYRIGHT',
+    'OpenBLAS-0.3.34-LICENSE': 'openblas/0.3.34/LICENSE',
+    'oneTBB-2023.2.0-LICENSE.txt': 'tbb/2023.2.0/LICENSE.txt',
+}
+for gcc_license in ('COPYING', 'COPYING.LIB', 'COPYING.RUNTIME'):
+    LICENSES['GCC-15.2.0-' + gcc_license] = 'gcc/15.2.0/' + gcc_license
+LLVM_LICENSE_NAME = 'LLVM-OpenMP-21.1.5-LICENSE.txt'
+LLVM_LICENSE_SHA = 'fdad1758a9e1f9d5a81e18879b3406772115edc92c24bfa36b70c654f325e8e4'
+
+
+class RuntimeFailure(Exception):
+    pass
+
+
+def sha(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def run(*args):
+    try:
+        return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
+    except FileNotFoundError:
+        raise RuntimeFailure('Missing Apple build tool ' + args[0] + '. Install Xcode Command Line Tools with xcode-select --install.') from None
+    except subprocess.CalledProcessError as error:
+        raise RuntimeFailure(args[0] + ' failed: ' + error.output.strip()) from None
+
+
+def dependencies(path):
+    return [line.strip().split(' (', 1)[0] for line in run('otool', '-L', str(path)).splitlines() if line.startswith('\t')][1:]
+
+
+def rpaths(path):
+    lines = run('otool', '-l', str(path)).splitlines()
+    return [lines[i + 2].strip().split(' (', 1)[0].removeprefix('path ') for i, line in enumerate(lines) if line.strip() == 'cmd LC_RPATH']
+
+
+def cached_runtime_valid(runtime):
+    manifest = runtime / 'runtime.json'
+    if manifest.exists():
+        try:
+            saved = json.loads(manifest.read_text())
+            expected_licenses = set(LICENSES) | {LLVM_LICENSE_NAME}
+            if saved.get('recipe') != RECIPE or set(saved['libraries']) != set(SOURCES) or set(saved['licenses']) != expected_licenses:
+                return False
+            if not saved['headers'] or 'opencv2/core.hpp' not in saved['headers']:
+                return False
+            for folder, values in [('lib', saved['libraries']), ('licenses', saved['licenses']), ('include/opencv4', saved['headers'])]:
+                for name, digest in values.items():
+                    if Path(name).is_absolute() or '..' in Path(name).parts or sha(runtime / folder / name) != digest:
+                        return False
+            return all((runtime / 'lib' / ('libopencv_' + name + '.dylib')).resolve() ==
+                       runtime / 'lib' / ('libopencv_' + name + '.414.dylib') for name in MODULES)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return False
+
+
+def download(url, destination, digest, maximum, context, headers=None):
+    if destination.exists() and sha(destination) == digest:
+        return
+    part = destination.with_name(destination.name + '.part-' + uuid.uuid4().hex)
+    try:
+        request = urllib.request.Request(url, headers=headers or {})
+        total = 0
+        with urllib.request.urlopen(request, context=context, timeout=30) as response, part.open('wb') as output:
+            while chunk := response.read(1024 * 1024):
+                total += len(chunk)
+                if total > maximum:
+                    raise RuntimeFailure('Download exceeded pinned size limit: ' + destination.name)
+                output.write(chunk)
+        if sha(part) != digest:
+            raise RuntimeFailure('SHA256 mismatch for ' + destination.name + '; the download was discarded. Try again.')
+        os.replace(part, destination)
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise RuntimeFailure('Could not download ' + destination.name + '. Check internet access to ghcr.io and github.com, then rerun. (' + type(error).__name__ + ')') from None
+    finally:
+        if part.exists():
+            part.unlink()
+
+
+def extract_selected(archive, extracted, prefix):
+    """Python 3.9-compatible extraction: only required regular files, no links."""
+    expected = set(SOURCES.values()) | set(LICENSES.values())
+    with tarfile.open(archive) as package:
+        seen = set()
+        for member in package:
+            path = Path(member.name)
+            if path.is_absolute() or '..' in path.parts:
+                raise RuntimeFailure('Unsafe bottle member in ' + archive.name)
+            if not member.name.startswith(prefix + '/'):
+                continue
+            header = member.name.startswith('opencv@4/4.14.0_11/include/opencv4/') and not member.isdir()
+            if member.name not in expected and not header:
+                continue
+            if not member.isfile() or member.name in seen or member.size > 80 * 1024 * 1024:
+                raise RuntimeFailure('Unexpected bottle member type or size: ' + member.name)
+            seen.add(member.name)
+            destination = extracted / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            # Extraction happens in a fresh private directory. We never extract
+            # archive links, modes, ownership, device nodes, or arbitrary files.
+            with package.extractfile(member) as source, destination.open('xb') as output:
+                shutil.copyfileobj(source, output)
+
+
+def prepare(runtime, cache):
+    if platform.system() != 'Darwin' or platform.machine() != 'arm64':
+        raise RuntimeFailure('Board OpenCV runtime requires macOS on Apple Silicon.')
+    if cached_runtime_valid(runtime):
+        print('Board: verified cached OpenCV runtime (macOS 26+, arm64).')
+        return
+    cache.mkdir(parents=True, exist_ok=True)
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    # Use the system CA store; some python.org installations have no bundled CA.
+    context = ssl.create_default_context(cafile='/etc/ssl/cert.pem')
+    for label, repository, prefix, digest, size in BOTTLES:
+        archive = cache / (label + '-' + digest[:12] + '-arm64-sequoia.tar.gz')
+        if not archive.exists() or sha(archive) != digest:
+            print('Board: downloading pinned ' + label + ' runtime bottle.', flush=True)
+            token_url = 'https://ghcr.io/token?service=ghcr.io&scope=repository:homebrew/core/' + repository + ':pull'
+            try:
+                # Public anonymous pull token, kept only in memory. No registry
+                # login, user token, credential file, or Homebrew is required.
+                with urllib.request.urlopen(token_url, context=context, timeout=20) as response:
+                    token = json.load(response)['token']
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError):
+                raise RuntimeFailure('Could not access the public Homebrew registry for ' + label + '. Check internet access to ghcr.io and rerun.') from None
+            download('https://ghcr.io/v2/homebrew/core/' + repository + '/blobs/sha256:' + digest,
+                     archive, digest, size, context, {'Authorization': 'Bearer ' + token})
+
+    llvm_license = cache / LLVM_LICENSE_NAME
+    download('https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-21.1.5/openmp/LICENSE.TXT', llvm_license,
+             LLVM_LICENSE_SHA, 100000, context)
+    with tempfile.TemporaryDirectory(prefix='opencv-extract-', dir=cache) as temporary:
+        extracted = Path(temporary)
+        for label, repository, prefix, digest, size in BOTTLES:
+            extract_selected(cache / (label + '-' + digest[:12] + '-arm64-sequoia.tar.gz'), extracted, prefix)
+        assemble(runtime, extracted, llvm_license)
+
+
+def assemble(runtime, extracted, llvm_license):
+    stage = runtime.with_name(runtime.name + '.stage-' + uuid.uuid4().hex)
+    (stage / 'lib').mkdir(parents=True)
+    (stage / 'licenses').mkdir()
+    shutil.copytree(extracted / 'opencv@4/4.14.0_11/include/opencv4', stage / 'include/opencv4')
+    sources = {name: extracted / source for name, source in SOURCES.items()}
+    for name, source in sources.items():
+        shutil.copy2(source, stage / 'lib' / name)
+    for name in sources:
+        library = stage / 'lib' / name
+        subprocess.run(['codesign', '--remove-signature', str(library)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        arguments = ['install_name_tool', '-id', '@rpath/' + name]
+        for dependency in dependencies(library):
+            if dependency.startswith(('/usr/lib/', '/System/Library/')):
+                continue
+            dependency_name = Path(dependency).name
+            if dependency_name not in sources:
+                raise RuntimeFailure('Unbundled runtime dependency: ' + dependency)
+            arguments += ['-change', dependency, '@rpath/' + dependency_name]
+        existing_rpaths = rpaths(library)
+        for old in existing_rpaths:
+            if old != '@loader_path':
+                arguments += ['-delete_rpath', old]
+        if '@loader_path' not in existing_rpaths:
+            arguments += ['-add_rpath', '@loader_path']
+        arguments.append(str(library))
+        run(*arguments)
+        run('codesign', '--force', '--sign', '-', str(library))
+        for dependency in dependencies(library):
+            if not dependency.startswith(('/usr/lib/', '/System/Library/', '@rpath/')):
+                raise RuntimeFailure('External runtime dependency remains: ' + dependency)
+    for name in MODULES:
+        (stage / 'lib' / ('libopencv_' + name + '.dylib')).symlink_to('libopencv_' + name + '.414.dylib')
+    licenses = {name: extracted / source for name, source in LICENSES.items()}
+    licenses[LLVM_LICENSE_NAME] = llvm_license
+    for name, source in licenses.items():
+        shutil.copy2(source, stage / 'licenses' / name)
+    metadata = {'recipe': RECIPE, 'opencv_version': '4.14.0', 'architecture': 'arm64', 'minimum_macos': '26.0',
+        'bottle_sha256': {label: digest for label, _, _, digest, _ in BOTTLES},
+        'libraries': {name: sha(stage / 'lib' / name) for name in sorted(sources)},
+        'licenses': {name: sha(stage / 'licenses' / name) for name in sorted(licenses)},
+        'headers': {str(path.relative_to(stage / 'include/opencv4')): sha(path)
+                    for path in sorted((stage / 'include/opencv4').rglob('*')) if path.is_file()},
+        'library_bytes': sum((stage / 'lib' / name).stat().st_size for name in sources)}
+    (stage / 'runtime.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    previous = runtime.with_name(runtime.name + '.previous')
+    if previous.exists():
+        shutil.rmtree(previous)
+    if runtime.exists():
+        runtime.rename(previous)
+    stage.rename(runtime)
+    if previous.exists():
+        shutil.rmtree(previous)
+    print('Board: staged', len(sources), 'self-contained native libraries,', metadata['library_bytes'], 'bytes; macOS 26+, arm64.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--cache-dir', type=Path, default=CACHE, help='Local download cache; no Homebrew or global cache is used.')
+    parser.add_argument('--runtime-dir', type=Path, default=RUNTIME, help='Destination for the self-contained runtime.')
+    arguments = parser.parse_args()
+    try:
+        prepare(arguments.runtime_dir.expanduser().resolve(), arguments.cache_dir.expanduser().resolve())
+    except (RuntimeFailure, OSError, tarfile.TarError) as error:
+        raise SystemExit('Board: ' + str(error)) from None
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,18 @@
+#!/bin/bash
+# Production image preparation/rendering with inert camera, clipboard and IPC.
+set -euo pipefail
+BOARD_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BOARD_TEST_SDK="$("$BOARD_ROOT/scripts/macos-sdk")"
+BOARD_TEST_DIR="$(mktemp -d -t BoardRegionChecks)"
+trap 'rm -rf "$BOARD_TEST_DIR"' EXIT
+BOARD_TEST_SOURCES=()
+for BOARD_SOURCE in BoardLibrary BoardOverlays LiveBoardAnnotations BoardOverlayViews BoardRegionCopy; do
+    BOARD_TEST_SOURCES+=("$BOARD_ROOT/Sources/BoardApp/$BOARD_SOURCE.swift")
+done
+for BOARD_CHECK in RegionCopyChecks LiveAnnotationChecks; do
+    xcrun swiftc -O -swift-version 5 -target "$(uname -m)-apple-macosx26.0" -sdk "$BOARD_TEST_SDK" "${BOARD_TEST_SOURCES[@]}" \
+        "$BOARD_ROOT/tests/BoardGeometryStub.swift" "$BOARD_ROOT/tests/$BOARD_CHECK.swift" \
+        -o "$BOARD_TEST_DIR/$BOARD_CHECK"
+    "$BOARD_TEST_DIR/$BOARD_CHECK"
+done
+python3 "$BOARD_ROOT/tests/check_annotation_model.py"

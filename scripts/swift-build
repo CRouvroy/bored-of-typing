@@ -1,0 +1,31 @@
+#!/bin/bash
+# Run SwiftPM normally, with a repository-local workaround for mixed-version
+# Command Line Tools manifest interfaces. Never modifies the installed toolchain.
+set -euo pipefail
+BOARD_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BOARD_SWIFT="$(xcrun --find swift)"
+BOARD_PM="$(dirname "$BOARD_SWIFT")/../lib/swift/pm"
+BOARD_PUBLIC="$BOARD_PM/ManifestAPI/PackageDescription.swiftmodule/$(uname -m)-apple-macos.swiftinterface"
+BOARD_PRIVATE="$BOARD_PM/ManifestAPI/PackageDescription.swiftmodule/$(uname -m)-apple-macos.private.swiftinterface"
+if [[ -z "${SWIFTPM_CUSTOM_LIBS_DIR:-}" && -f "$BOARD_PUBLIC" && -f "$BOARD_PRIVATE" ]] && \
+   [[ "$(sed -n '2p' "$BOARD_PUBLIC")" != "$(sed -n '2p' "$BOARD_PRIVATE")" ]]; then
+    BOARD_COPY="$BOARD_ROOT/.build/toolchain"
+    mkdir -p "$BOARD_COPY/ManifestAPI"
+    cp -R "$BOARD_PM/ManifestAPI/" "$BOARD_COPY/ManifestAPI/"
+    # Remove only the local copies that shadow the current public interfaces.
+    find "$BOARD_COPY/ManifestAPI" -name '*.private.swiftinterface' -delete
+    if [[ -d "$BOARD_PM/PluginAPI" && ! -e "$BOARD_COPY/PluginAPI" ]]; then
+        ln -s "$BOARD_PM/PluginAPI" "$BOARD_COPY/PluginAPI"
+    fi
+    export SWIFTPM_CUSTOM_LIBS_DIR="$BOARD_COPY"
+    echo "Board: using local manifest interfaces to bypass mixed-version Command Line Tools." >&2
+fi
+cd "$BOARD_ROOT"
+# Use the same SDK for SwiftPM, the icon, and standalone checks.
+if [[ "${1:-}" =~ ^(build|test|run)$ && "$*" != *"--sdk"* ]]; then
+    BOARD_SDK="$("$BOARD_ROOT/scripts/macos-sdk")"
+    BOARD_COMMAND="$1"
+    shift
+    exec "$BOARD_SWIFT" "$BOARD_COMMAND" --sdk "$BOARD_SDK" "$@"
+fi
+exec "$BOARD_SWIFT" "$@"

@@ -1,0 +1,78 @@
+#!/bin/bash
+set -euo pipefail
+BOARD_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BOARD_CONFIG="${1:-release}"
+if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
+    echo 'Board builds on Apple Silicon Macs. Run Terminal natively, without Rosetta.' >&2
+    exit 1
+fi
+if [[ "$BOARD_CONFIG" != release && "$BOARD_CONFIG" != debug ]]; then
+    echo 'Usage: scripts/build-app [release|debug]' >&2
+    exit 1
+fi
+if ! command -v python3 >/dev/null || ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
+    echo 'Board requires Python 3.9+ for build tooling (included with Command Line Tools).' >&2
+    exit 1
+fi
+BOARD_SDK="$("$BOARD_ROOT/scripts/macos-sdk")"
+export BOARD_SDK_PATH="$BOARD_SDK"
+BOARD_MAP_FLAGS=(-Xswiftc -file-prefix-map -Xswiftc "$BOARD_ROOT=Board"
+                 -Xswiftc -debug-prefix-map -Xswiftc "$BOARD_ROOT=Board"
+                 -Xcc "-ffile-prefix-map=$BOARD_ROOT=Board")
+"$BOARD_ROOT/scripts/prepare-opencv-runtime"
+"$BOARD_ROOT/scripts/swift-build" build -c "$BOARD_CONFIG" "${BOARD_MAP_FLAGS[@]}"
+BOARD_BIN="$("$BOARD_ROOT/scripts/swift-build" build -c "$BOARD_CONFIG" --show-bin-path)"
+BOARD_APP="$BOARD_ROOT/dist/Board.app"
+mkdir -p "$BOARD_APP/Contents/MacOS" "$BOARD_APP/Contents/Resources" "$BOARD_APP/Contents/Frameworks"
+chmod -R u+w "$BOARD_APP/Contents/Frameworks"
+cp "$BOARD_BIN/Board" "$BOARD_APP/Contents/MacOS/.Board-new"
+if [[ "$BOARD_CONFIG" == release ]]; then
+    # Linker debug records include local object paths even after compiler prefix mapping.
+    xcrun strip -S "$BOARD_APP/Contents/MacOS/.Board-new"
+fi
+mv "$BOARD_APP/Contents/MacOS/.Board-new" "$BOARD_APP/Contents/MacOS/Board"
+rm -f "$BOARD_APP/Contents/Resources/board-bridge.py"
+cp "$BOARD_ROOT/scripts/board-mcp.py" "$BOARD_APP/Contents/Resources/board-mcp.py"
+cp "$BOARD_ROOT/scripts/setup-claude-mcp.py" "$BOARD_APP/Contents/Resources/setup-claude-mcp.py"
+cp "$BOARD_ROOT/README.md" "$BOARD_APP/Contents/Resources/README.md"
+cp -R "$BOARD_ROOT/.build/OpenCVRuntime/lib/." "$BOARD_APP/Contents/Frameworks/"
+chmod -R u+w "$BOARD_APP/Contents/Frameworks"
+mkdir -p "$BOARD_APP/Contents/Resources/OpenCVLicenses"
+cp -R "$BOARD_ROOT/.build/OpenCVRuntime/licenses/." "$BOARD_APP/Contents/Resources/OpenCVLicenses/"
+cp "$BOARD_ROOT/.build/OpenCVRuntime/runtime.json" "$BOARD_APP/Contents/Resources/OpenCVRuntime.json"
+if otool -l "$BOARD_APP/Contents/MacOS/Board" | grep -F "$BOARD_ROOT/.build/OpenCVRuntime/lib" >/dev/null; then
+    install_name_tool -delete_rpath "$BOARD_ROOT/.build/OpenCVRuntime/lib" "$BOARD_APP/Contents/MacOS/Board"
+fi
+if ! otool -l "$BOARD_APP/Contents/MacOS/Board" | grep -F '@executable_path/../Frameworks' >/dev/null; then
+    install_name_tool -add_rpath '@executable_path/../Frameworks' "$BOARD_APP/Contents/MacOS/Board"
+fi
+cat > "$BOARD_APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Board</string>
+<key>CFBundleIdentifier</key><string>research.board.app</string>
+<key>CFBundleName</key><string>Board</string>
+<key>CFBundleDisplayName</key><string>Board</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>26.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSCameraUsageDescription</key><string>Board photographs your research board only when you turn the camera on.</string>
+<key>NSCameraUseContinuityCameraDeviceType</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>CFBundleDevelopmentRegion</key><string>en</string>
+<key>CFBundleIconFile</key><string>Board</string>
+</dict></plist>
+PLIST
+if [[ ! -f "$BOARD_ROOT/.build/Board.icns" ]]; then
+    xcrun swift -sdk "$BOARD_SDK" "$BOARD_ROOT/scripts/make-icon.swift" "$BOARD_ROOT/.build"
+    iconutil -c icns "$BOARD_ROOT/.build/Board.iconset" -o "$BOARD_ROOT/.build/Board.icns"
+fi
+cp "$BOARD_ROOT/.build/Board.icns" "$BOARD_APP/Contents/Resources/Board.icns"
+for BOARD_LIBRARY in "$BOARD_APP/Contents/Frameworks/"*.dylib; do
+    if [[ ! -L "$BOARD_LIBRARY" ]]; then codesign --force --sign - "$BOARD_LIBRARY"; fi
+done
+codesign --force --deep --sign - "$BOARD_APP"
+printf 'Built %s\n' "$BOARD_APP"

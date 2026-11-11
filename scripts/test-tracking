@@ -1,0 +1,38 @@
+#!/bin/bash
+set -euo pipefail
+BOARD_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BOARD_TEST_BUILD="$BOARD_ROOT/.build/tracking-test-runner"
+BOARD_TEST_RUNTIME="$BOARD_ROOT/.build/OpenCVRuntime"
+BOARD_TEST_SDK="$("$BOARD_ROOT/scripts/macos-sdk")"
+"$BOARD_ROOT/scripts/prepare-opencv-runtime"
+mkdir -p "$BOARD_TEST_BUILD/BoardNativeTracker"
+cat > "$BOARD_TEST_BUILD/BoardNativeTracker/module.modulemap" <<EOF
+module BoardNativeTracker {
+    header "$BOARD_ROOT/Sources/BoardNativeTracker/include/BoardNativeTracker.h"
+    export *
+}
+EOF
+xcrun clang++ -std=c++17 -O2 -mmacosx-version-min=26.0 -isysroot "$BOARD_TEST_SDK" \
+    -I "$BOARD_ROOT/Sources/BoardNativeTracker/include" -I "$BOARD_TEST_RUNTIME/include/opencv4" \
+    -c "$BOARD_ROOT/Sources/BoardNativeTracker/BoardNativeTracker.cpp" -o "$BOARD_TEST_BUILD/BoardNativeTracker.o"
+BOARD_SWIFT_ARGS=(-O -swift-version 5 -target "$(uname -m)-apple-macosx26.0" -sdk "$BOARD_TEST_SDK"
+    -I "$BOARD_TEST_BUILD/BoardNativeTracker" -L "$BOARD_TEST_RUNTIME/lib"
+    -lopencv_calib3d -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core -lc++
+    -Xlinker -rpath -Xlinker "$BOARD_TEST_RUNTIME/lib"
+    "$BOARD_TEST_BUILD/BoardNativeTracker.o" "$BOARD_ROOT/Sources/BoardApp/BoardTracking.swift")
+for BOARD_CHECK in TrackingPresentationChecks TrackingRecoveryChecks; do
+    xcrun swiftc "${BOARD_SWIFT_ARGS[@]}" "$BOARD_ROOT/Sources/BoardApp/CameraController.swift" \
+        "$BOARD_ROOT/tests/$BOARD_CHECK.swift" -o "$BOARD_TEST_BUILD/$BOARD_CHECK"
+    "$BOARD_TEST_BUILD/$BOARD_CHECK"
+done
+xcrun swiftc "${BOARD_SWIFT_ARGS[@]}" "$BOARD_ROOT/tests/TrackingChecks.swift" -o "$BOARD_TEST_BUILD/TrackingChecks"
+"$BOARD_TEST_BUILD/TrackingChecks"
+if [[ "$#" -ge 3 ]]; then
+    "$BOARD_TEST_BUILD/TrackingChecks" --real-wrapper-image "$2"
+    xcrun clang++ -std=c++17 -O2 -mmacosx-version-min=26.0 -isysroot "$BOARD_TEST_SDK" \
+        -I "$BOARD_ROOT/Sources/BoardNativeTracker/include" \
+        "$BOARD_TEST_BUILD/BoardNativeTracker.o" "$BOARD_ROOT/tests/NativeTrackerChecks.mm" \
+        -L "$BOARD_TEST_RUNTIME/lib" -lopencv_calib3d -lopencv_features2d -lopencv_flann -lopencv_imgproc -lopencv_core \
+        -framework AppKit -framework ImageIO -Wl,-rpath,"$BOARD_TEST_RUNTIME/lib" -o "$BOARD_TEST_BUILD/NativeTrackerChecks"
+    "$BOARD_TEST_BUILD/NativeTrackerChecks" "$@"
+fi
