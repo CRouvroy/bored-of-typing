@@ -49,6 +49,7 @@ struct FixtureCamera: Identifiable { let id: String; let name: String }
     func select(_ snapshot:BoardSnapshot) { fatalError("Inert fixture") }
     func setOverlayHidden(_ overlay:BoardOverlay,hidden:Bool) { fatalError("Inert fixture") }
     func setOverlayOpacity(_ overlay:BoardOverlay,opacity:Double) { fatalError("Inert fixture") }
+    func deleteOverlays(_ selection:[BoardOverlay]) { fatalError("Inert fixture") }
 }
 // PRODUCTION FRAGMENTS
 struct CopyChoiceFixture:View {

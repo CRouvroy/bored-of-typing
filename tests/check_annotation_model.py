@@ -221,6 +221,22 @@ enum BoardTrackingState { case off, tracking, lost }
             "Live-region copy preserves current note-local placement after an explicit move")
         let copiesBeforeFailures = BoardClipboard.copied.count
 
+        let frozen = overlayModel.library.snapshots
+        let liveNotes = overlayModel.overlays.overlays
+        overlayModel.foregroundMasks[note.id] = mask
+        overlayModel.deleteOverlays([movedNote])
+        expect(!overlayModel.overlays.overlays.contains { $0.id == note.id } && overlayModel.foregroundMasks[note.id] == nil,
+            "Deleting a live AI note also clears its temporary opacity mask")
+        expect(overlayModel.library.snapshots == frozen && overlayModel.liveAnnotations.annotations == [region],
+            "Deleting AI annotations never edits saved versions or physical-region rectangles")
+        let retained = overlayModel.overlays.overlays
+        overlayModel.errorMessage = nil
+        overlayModel.deleteOverlays(liveNotes)
+        expect(overlayModel.errorMessage != nil && overlayModel.overlays.overlays == retained,
+            "A stale bulk selection reports failure without partial deletion")
+        overlayModel.deleteOverlays(retained)
+        expect(overlayModel.overlays.overlays.isEmpty, "Clear all deletes hidden AI annotations too")
+
         let external = Data("{\"schemaVersion\":99,\"annotations\":[]}".utf8)
         try external.write(to:model.liveAnnotations.fileURL)
         model.markLive(CGRect(x:0.2,y:0.3,width:0.2,height:0.2))

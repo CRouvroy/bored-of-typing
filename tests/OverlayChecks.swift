@@ -74,6 +74,37 @@ import Foundation
         rejects("Bound overlay count") { _ = try bounded.upsert(BoardOverlay(regionID: region.id), expectedRevision: nil) }
         expect(bounded.overlays.count == 60, "Count limit preserves all existing entries")
 
+        let deletions = BoardOverlayStore(rootURL: root.appendingPathComponent("deletions"))
+        let first = try deletions.upsert(BoardOverlay(regionID: region.id, title: "First"), expectedRevision: nil)
+        let hiddenToDelete = try deletions.upsert(BoardOverlay(regionID: region.id, title: "Second", hidden: true), expectedRevision: nil)
+        let writer = BoardOverlayStore(rootURL: deletions.fileURL.deletingLastPathComponent())
+        let independent = try writer.upsert(BoardOverlay(regionID: region.id, title: "Independent"), expectedRevision: nil)
+        try deletions.remove(expectedRevisions: [first.id: first.revision])
+        expect(deletions.overlays == [hiddenToDelete, independent], "Delete removes one entry and preserves independent additions")
+        expect(BoardOverlayStore(rootURL: deletions.fileURL.deletingLastPathComponent()).overlays == [hiddenToDelete, independent],
+            "Deletion persists across reopening")
+        let beforeConflict = try Data(contentsOf: deletions.fileURL)
+        rejects("Deleting a missing item must fail") { try deletions.remove(expectedRevisions: [first.id: first.revision]) }
+        rejects("Batch delete must reject stale revisions atomically") {
+            try deletions.remove(expectedRevisions: [hiddenToDelete.id: hiddenToDelete.revision, independent.id: independent.revision + 1])
+        }
+        expect(try Data(contentsOf: deletions.fileURL) == beforeConflict && deletions.overlays == [hiddenToDelete, independent],
+            "Failed deletion preserves exact bytes and all other selections")
+        let selected = Dictionary(uniqueKeysWithValues: deletions.overlays.map { ($0.id, $0.revision) })
+        let later = try writer.upsert(BoardOverlay(regionID: region.id, title: "Added while confirming"), expectedRevision: nil)
+        try deletions.remove(expectedRevisions: selected)
+        expect(deletions.overlays == [later], "Clear includes hidden entries but preserves additions made after selection")
+        try deletions.remove(expectedRevisions: [later.id: later.revision])
+        expect(deletions.overlays.isEmpty && BoardOverlayStore(rootURL: deletions.fileURL.deletingLastPathComponent()).overlays.isEmpty,
+            "Clear persists an empty live overlay list")
+        try Data("{broken".utf8).write(to: deletions.fileURL)
+        rejects("Delete cannot overwrite corrupt external data") { try deletions.remove(expectedRevisions: [later.id: later.revision]) }
+        expect(try Data(contentsOf: deletions.fileURL) == Data("{broken".utf8), "Corrupt overlay bytes survive deletion attempts")
+        let freed = bounded.overlays[0]
+        try bounded.remove(expectedRevisions: [freed.id: freed.revision])
+        _ = try bounded.upsert(BoardOverlay(regionID: region.id, title: "Replacement"), expectedRevision: nil)
+        expect(bounded.overlays.count == 60 && !bounded.overlays.contains { $0.id == freed.id }, "Deletion frees an overlay slot")
+
         let renderer = BoardOverlayRenderer(), size = CGSize(width: 800, height: 500)
         let sourceContext = CGContext(data: nil, width: 800, height: 500, bitsPerComponent: 8, bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!

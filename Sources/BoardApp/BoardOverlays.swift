@@ -117,6 +117,17 @@ enum BoardOverlayError: LocalizedError {
     @discardableResult func setOpacity(id: UUID, opacity: Double, expectedRevision: Int) throws -> BoardOverlay {
         try update(id: id, expectedRevision: expectedRevision, opacity: opacity)
     }
+    /// Remove only the exact versions selected by the user, preserving other writers' additions.
+    func remove(expectedRevisions: [UUID: Int]) throws {
+        guard !expectedRevisions.isEmpty else { return }
+        try transaction { values in
+            for (id, revision) in expectedRevisions {
+                guard let overlay = values.first(where: { $0.id == id }) else { throw BoardOverlayError.unknownOverlay }
+                guard overlay.revision == revision else { throw BoardOverlayError.revisionConflict }
+            }
+            values.removeAll { expectedRevisions[$0.id] != nil }
+        }
+    }
     @discardableResult func update(id: UUID, expectedRevision: Int, hidden: Bool? = nil, opacity: Double? = nil) throws -> BoardOverlay {
         if let opacity, !opacity.isFinite || !(0...1).contains(opacity) { throw BoardOverlayError.invalidData }
         return try transaction { values in
@@ -138,7 +149,7 @@ enum BoardOverlayError: LocalizedError {
             return true
         } catch { canWrite = false; errorMessage = error.localizedDescription; throw error }
     }
-    private func transaction(_ change: (inout [BoardOverlay]) throws -> BoardOverlay) throws -> BoardOverlay {
+    private func transaction<Result>(_ change: (inout [BoardOverlay]) throws -> Result) throws -> Result {
         do {
             guard canWrite else { throw BoardOverlayError.unavailable }
             try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)

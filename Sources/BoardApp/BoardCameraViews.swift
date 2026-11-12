@@ -6,6 +6,8 @@ struct BoardCameraControls: View {
     @ObservedObject var model: BoardModel
     @ObservedObject var camera: CameraController
     @State private var copied = false
+    @State private var pendingClear: [BoardOverlay] = []
+    @State private var showClearConfirmation = false
 
     private var sourceName: String { camera.devices.first { $0.id == camera.selectedDeviceID }?.name ?? "Camera" }
     private var trackingActive: Bool { camera.trackingState == .tracking }
@@ -75,6 +77,13 @@ struct BoardCameraControls: View {
                 copied = false
             }
         }.font(.system(size: 14))
+        .confirmationDialog("Delete all AI annotations?", isPresented: $showClearConfirmation, titleVisibility: .visible) {
+            Button("Delete all", role: .destructive) {
+                model.deleteOverlays(pendingClear)
+                pendingClear = []
+            }
+            Button("Cancel", role: .cancel) { pendingClear = [] }
+        }
     }
 
     private func actionLabel(_ title: String, symbol: String, selected: Bool = false) -> some View {
@@ -120,17 +129,24 @@ struct BoardCameraControls: View {
             Button("Refresh cameras", action: camera.refreshDevices)
             Button("Camera settings", action: camera.openCameraSettings)
             if !model.overlays.overlays.isEmpty {
-                Menu("AI overlays") {
+                Menu("AI annotations") {
                     Toggle("Automatic transparency", isOn: $model.preservePhysicalWriting)
                     Divider()
                     ForEach(model.overlays.overlays) { overlay in
                         Menu(overlay.title.isEmpty ? "Overlay" : overlay.title) {
-                            Button(overlay.hidden ? "Restore" : "Remove from board") {
+                            Button(overlay.hidden ? "Show" : "Hide") {
                                 model.setOverlayHidden(overlay, hidden: !overlay.hidden)
                             }
                             Button("Opaque") { model.setOverlayOpacity(overlay, opacity: 1) }
                             Button("Transparent") { model.setOverlayOpacity(overlay, opacity: 0.25) }
+                            Divider()
+                            Button("Delete", role: .destructive) { model.deleteOverlays([overlay]) }
                         }
+                    }
+                    Divider()
+                    Button("Clear all…", role: .destructive) {
+                        pendingClear = model.overlays.overlays
+                        showClearConfirmation = true
                     }
                 }
             }

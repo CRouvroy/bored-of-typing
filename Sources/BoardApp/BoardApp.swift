@@ -253,6 +253,12 @@ final class BoardModel: ObservableObject {
         do { _ = try overlays.setOpacity(id: overlay.id, opacity: opacity, expectedRevision: overlay.revision) }
         catch { errorMessage = error.localizedDescription }
     }
+    func deleteOverlays(_ selection: [BoardOverlay]) {
+        do {
+            try overlays.remove(expectedRevisions: Dictionary(uniqueKeysWithValues: selection.map { ($0.id, $0.revision) }))
+            for overlay in selection { foregroundMasks.removeValue(forKey: overlay.id) }
+        } catch { errorMessage = error.localizedDescription }
+    }
     func importImage() {
         guard saveIfNeeded() else { return }
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.allowsMultipleSelection = false
